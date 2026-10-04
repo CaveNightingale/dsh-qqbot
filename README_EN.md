@@ -82,7 +82,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `provider` | string | `deepseek-official` | LLM provider name |
 | `model` | string | `deepseek-chat` | Model name |
 | `preset` | string | - | Agent preset id |
-| `cwd` | string | `process.cwd()` | Agent working directory |
+| `cwd` | string | `process.cwd()` | Agent working directory (a host path; with an fs provider mounted it is registered in that provider's execution world — `/workspace` in a sandboxed deployment) |
 | `requireMention` | boolean | `true` | Whether group messages require @bot to trigger |
 | `groupPrompt` | string | - | Extra system prompt for group chats |
 | `directPrompt` | string | - | Extra system prompt for direct chats |
@@ -130,6 +130,11 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 |------|------|--------|------|
 | `sendFile.restrictPaths` | boolean | `true` | Enable path allowlist (media + cwd + extraRoots only) |
 | `sendFile.extraRoots` | string[] | `[]` | Extra allowed root directories |
+
+`qqbot_send_file` takes `file_path` in the **workspace spelling** (`/workspace/...` in a
+sandboxed deployment); a relative path resolves against the session working directory, and the
+host directories in the allowlist (the media root and `extraRoots`) are mapped into that same
+world before the containment check.
 
 ## Built-in Commands
 

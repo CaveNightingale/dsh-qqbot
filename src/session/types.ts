@@ -28,6 +28,8 @@ export interface DshAgent {
   /** 底层 session（fork 时作为 source，events 用于统计/导出） */
   readonly session: {
     readonly id: string;
+    /** session header（cwd 是执行世界的拼写，相对路径按它解析） */
+    readonly header?: { readonly cwd?: string };
     readonly events?: readonly SessionEventLike[];
   };
   cancel(cause: { kind: string }): void;
@@ -77,6 +79,32 @@ export interface DshAgentHandle {
 /** sessions 服务（fork 能力） */
 export interface SessionsService {
   fork(source: unknown, boundary?: number): { events: readonly unknown[] };
+}
+
+/**
+ * ctx.fs 服务的最小接口。
+ *
+ * 路径是执行世界的拼写：宿主 backend 下与宿主路径相同，沙箱 / 远端 backend 下是
+ * 另一套名字（bwrap 部署把工作区绑到 `/workspace`）。模型给的路径、会话 cwd 都
+ * 属于这个世界，插件要落到字节或宿主名字时必须经由这里。
+ */
+export interface DshFsLike {
+  /** 解析调用方的路径（相对路径按 `opts.cwd`，也就是会话 cwd）。 */
+  resolve(
+    path: string,
+    opts?: { cwd?: string; signal?: AbortSignal },
+  ): Promise<{ targetKey: string; displayPath: string }>;
+  /** target 的元信息；不存在时返回 undefined。 */
+  stat(
+    target: unknown,
+    signal?: AbortSignal,
+  ): Promise<{ type: 'file' | 'directory' | 'other'; size?: number } | undefined>;
+  /** 读原始字节；超过 maxBytes 报错，不截断。 */
+  readBytes(target: unknown, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>;
+  /** 规范包含判定：child 是否在 parent 内（含自身）。 */
+  contains(parent: unknown, child: unknown): boolean;
+  /** 宿主路径 → 执行世界拼写；这个世界读不到的宿主文件返回 undefined。 */
+  processPathFromHostPath(hostPath: string): string | undefined;
 }
 
 export interface DshAgentRegistry {

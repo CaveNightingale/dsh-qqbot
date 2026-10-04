@@ -82,7 +82,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `provider` | string | `deepseek-official` | LLM 提供商名称 |
 | `model` | string | `deepseek-chat` | 模型名称 |
 | `preset` | string | - | Agent preset id |
-| `cwd` | string | `process.cwd()` | Agent 工作目录 |
+| `cwd` | string | `process.cwd()` | Agent 工作目录（宿主路径；挂载了 fs provider 时按其执行世界登记，沙箱部署下即 `/workspace`） |
 | `requireMention` | boolean | `true` | 群聊是否需要 @bot 才触发 |
 | `groupPrompt` | string | - | 群聊额外 system prompt |
 | `directPrompt` | string | - | 私聊额外 system prompt |
@@ -130,6 +130,10 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 |------|------|--------|------|
 | `sendFile.restrictPaths` | boolean | `true` | 是否启用路径白名单（仅 media + cwd + extraRoots） |
 | `sendFile.extraRoots` | string[] | `[]` | 额外允许访问的根目录 |
+
+`qqbot_send_file` 的 `file_path` 按**工作区的拼写**传（沙箱部署下是 `/workspace/...`），
+相对路径按会话工作目录解析；目录白名单里的宿主目录（media 根目录、`extraRoots`）会先
+换算到同一个世界再比较。
 
 ## 内置命令
 

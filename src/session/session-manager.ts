@@ -17,6 +17,7 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
+import { worldPath } from '../shared/index.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
 import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
@@ -183,6 +184,18 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Agent 工作目录的执行世界拼写。
+   *
+   * `config.cwd` 与回落值 `process.cwd()` 都是宿主拼写，而 session header 记的必须是
+   * 执行世界的名字：沙箱 / 远端 backend 下两者不同（bwrap 部署把工作区叫
+   * `/workspace`），写错会让项目级 skill、项目 AGENTS.md 和相对路径工具全部落空。
+   * 本地 backend 的 `processPathFromHostPath` 是恒等变换，行为不变。
+   */
+  private worldCwd(): string {
+    return worldPath(this.ctx, this.config.cwd || process.cwd());
+  }
+
   // ── 模型相关（委托给 ModelResolver） ──
 
   getEffectiveModel(scope: ChatScope, peerId: string): ModelRoute | undefined {
@@ -315,7 +328,7 @@ export class SessionManager {
       sessionId: childId,
       seed,
       meta: {
-        cwd: this.config.cwd || process.cwd(),
+        cwd: this.worldCwd(),
         parentSession: record.sessionId,
         seedLength: seed.length,
         ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}),
@@ -509,7 +522,7 @@ export class SessionManager {
         const created = await this.agents.create({
           sessionId,
           meta: {
-            cwd: this.config.cwd || process.cwd(),
+            cwd: this.worldCwd(),
             ...(agentPreset ? { agentPreset } : {}),
           },
           ...(route ? { agentOptions: route } : {}),

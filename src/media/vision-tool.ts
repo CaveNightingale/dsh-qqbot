@@ -2,7 +2,7 @@
  * 内置 qqbot_describe_image 视觉工具。
  *
  * 复用 dsh 生态的 llm + attachments 服务：
- *   1. 加载图片（本地绝对路径 / http URL）→ magic bytes 嗅探 mediaType
+ *   1. 加载图片（执行世界路径 / http URL）→ magic bytes 嗅探 mediaType
  *   2. attachments.saveImage → ImageAttachmentRef（字节不进 session log）
  *   3. createUserMessage(ImageBlock + text) → llm.stream → BlockAssembler 收集文本
  *
@@ -23,6 +23,7 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm';
 import type { VisionConfig } from '../config.ts';
+import type { DshAgent, DshFsLike } from '../session/index.ts';
 import type { Logger } from '../types.ts';
 
 /** 通过 dsh-llm 的 ImageBlock 间接引用 dsh-attachment 类型，避免直接依赖 dsh-attachment */
@@ -76,11 +77,13 @@ function sniffImageMediaType(bytes: Uint8Array): ImageMediaType | null {
   return null;
 }
 
-/** 加载图片字节（本地路径 / http URL），校验大小 + 嗅探 MIME */
+/** 加载图片字节（执行世界路径 / http URL），校验大小 + 嗅探 MIME */
 async function loadImageBytes(
   image: string,
   maxBytes: number,
   signal: AbortSignal,
+  fs: DshFsLike | undefined,
+  cwd: string | undefined,
 ): Promise<{ data: Uint8Array; mediaType: ImageMediaType }> {
   let data: Uint8Array;
   if (/^https?:\/\//i.test(image)) {
@@ -89,6 +92,15 @@ async function loadImageBytes(
     const buf = Buffer.from(await resp.arrayBuffer());
     if (buf.length > maxBytes) throw new Error(`qqbot_describe_image: image too large (${buf.length} bytes)`);
     data = new Uint8Array(buf);
+  } else if (fs !== undefined) {
+    // 路径属于执行世界（沙箱部署下是 /workspace），直接件走 ctx.fs，不碰宿主文件系统
+    const target = await fs.resolve(image, { ...(cwd !== undefined ? { cwd } : {}), signal });
+    const info = await fs.stat(target, signal);
+    if (info?.type !== 'file') throw new Error(`qqbot_describe_image: image file not found: ${image}`);
+    if (info.size !== undefined && info.size > maxBytes) {
+      throw new Error(`qqbot_describe_image: image too large (${info.size} bytes)`);
+    }
+    data = await fs.readBytes(target, signal, maxBytes);
   } else {
     const info = await stat(image).catch(() => null);
     if (!info?.isFile()) throw new Error(`qqbot_describe_image: image file not found: ${image}`);
@@ -244,7 +256,7 @@ export function registerDescribeImageTool(ctx: Context, vision: VisionConfig, lo
       properties: {
         image: {
           type: 'string',
-          description: 'Absolute path to a local image file, or an http(s) URL of the image.',
+          description: 'Path of the image in the workspace spelling (e.g. /workspace/shot.png), or an http(s) URL of the image.',
         },
         prompt: {
           type: 'string',
@@ -271,13 +283,15 @@ export function registerDescribeImageTool(ctx: Context, vision: VisionConfig, lo
         { type: 'text', text: (value as { text: string }).text },
       ],
     },
-    async execute(args: unknown, exec: { signal: AbortSignal }): Promise<Record<string, unknown>> {
+    async execute(args: unknown, exec: { signal: AbortSignal; agent?: unknown }): Promise<Record<string, unknown>> {
       const { image, prompt } = args as DescribeImageArgs;
       if (typeof image !== 'string' || image.length === 0) {
         throw new Error('qqbot_describe_image: `image` must be a non-empty string');
       }
 
-      const loaded = await loadImageBytes(image, vision.maxBytes, exec.signal);
+      const fs = ctx.get('fs') as DshFsLike | undefined;
+      const cwd = (exec.agent as DshAgent | undefined)?.session.header?.cwd;
+      const loaded = await loadImageBytes(image, vision.maxBytes, exec.signal, fs, cwd);
       const ref = await attachments.saveImage({
         data: loaded.data,
         mediaType: loaded.mediaType,
