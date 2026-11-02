@@ -1,9 +1,68 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ImQQBotConfig } from '../config.ts';
-import type { DshFsLike, SessionManager } from '../session/index.ts';
+import type { DshAgent, DshFsLike, SessionManager } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
-import { registerSendFileTool } from './send-file-tool.ts';
+import { logSendFileToolState, registerSendFileTool } from './send-file-tool.ts';
+
+describe('send-file debug diagnostics', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('reports an unavailable tools service without interrupting the caller', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const ctx = { get: () => undefined } as unknown as Context;
+
+    logSendFileToolState(ctx, 'test');
+
+    expect(log).toHaveBeenCalledWith('[im-qqbot:debug] test', expect.objectContaining({
+      toolsAvailable: false,
+      registerType: 'undefined',
+      globalRegistered: 'inspection unavailable',
+    }));
+  });
+
+  it('distinguishes global registration from agent visibility using the agent context', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const globalTools = { register: vi.fn(), get: () => ({}) };
+    const scopedTools = { get: vi.fn(() => undefined), schemas: vi.fn(() => [{ name: 'bash' }]) };
+    const ctx = { get: () => globalTools } as unknown as Context;
+    const agent = { ctx: { get: () => scopedTools } } as unknown as DshAgent;
+
+    logSendFileToolState(ctx, 'test', agent);
+
+    expect(scopedTools.get).toHaveBeenCalledWith('qqbot_send_file', agent);
+    expect(scopedTools.schemas).toHaveBeenCalledWith(agent);
+    expect(log).toHaveBeenCalledWith('[im-qqbot:debug] test', expect.objectContaining({
+      globalRegistered: true,
+      agentContextToolsAvailable: true,
+      agentRegistered: false,
+      modelToolNames: ['bash'],
+    }));
+  });
+
+  it('reports registered tools separately from PTC presentation', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const tools = { get: () => ({}), schemas: () => [{ name: 'run_code' }] };
+    const ctx = { get: () => tools } as unknown as Context;
+    const agent = { ctx } as unknown as DshAgent;
+
+    logSendFileToolState(ctx, 'test', agent);
+
+    expect(log).toHaveBeenCalledWith('[im-qqbot:debug] test', expect.objectContaining({
+      agentRegistered: true,
+      modelToolNames: ['run_code'],
+    }));
+  });
+
+  it('surfaces diagnostic failures without breaking normal session handling', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = new Error('schema inspection failed');
+    const ctx = { get: () => ({ schemas: () => { throw error; } }) } as unknown as Context;
+
+    expect(() => logSendFileToolState(ctx, 'test')).not.toThrow();
+    expect(log).toHaveBeenCalledWith('[im-qqbot:debug] test: tool inspection failed', error);
+  });
+});
 
 /** 部署事实：宿主工作区与 media 目录在执行世界里叫这两个名字 */
 const HOST_WORKSPACE = '/srv/project';

@@ -135,6 +135,14 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 相对路径按会话工作目录解析；目录白名单里的宿主目录（media 根目录、`extraRoots`）会先
 换算到同一个世界再比较。
 
+当前调试版本会通过 `console.log` 直接输出 `[im-qqbot:debug]` 日志，不依赖 Cordis
+logger 或 `debug` 配置。重新构建、部署并重启后，检查 `send-file registration`、
+`tools.register` 和 `QQ session ready` 日志：`globalRegistered` 表示全局注册状态，
+`agentRegistered` 表示当前会话是否能查到工具，`modelToolNames` 是模型可见的工具名列表。
+`inspection unavailable` 表示宿主未提供对应检查接口；`agentContextToolsAvailable`
+为 false 时，会退回使用宿主注册表检查会话。日志不主动输出凭据、消息正文或 QQ 用户标识，
+但异常对象可能包含宿主错误详情，分享前请脱敏。排障结束后应移除这些临时日志。
+
 ## 内置命令
 
 | 命令 | 说明 |

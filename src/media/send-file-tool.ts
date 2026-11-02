@@ -10,7 +10,6 @@
  *   - 路径白名单：默认只允许访问 media 目录 + 会话 cwd，可开关 + 扩展白名单。
  */
 import { basename } from 'node:path';
-import { CHUNKED_UPLOAD_MAX_SIZE } from '@tencent-connect/qqbot-nodejs';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { ImQQBotConfig, SendFileConfig } from '../config.ts';
@@ -45,6 +44,32 @@ export interface MediaSenderLike {
 /** tools 服务最小接口 */
 interface ToolsRegistryLike {
   register(definition: unknown): unknown;
+  get?(name: string, agent?: DshAgent): unknown;
+  schemas?(agent?: DshAgent): readonly { name: string }[];
+}
+
+export function logSendFileToolState(ctx: Context, phase: string, agent?: DshAgent): void {
+  try {
+    const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
+    const agentTools = agent?.ctx?.get('tools') as ToolsRegistryLike | undefined;
+    const scopedTools = agentTools ?? tools;
+    console.log(`[im-qqbot:debug] ${phase}`, {
+      pid: process.pid,
+      toolsAvailable: tools !== undefined,
+      registerType: typeof tools?.register,
+      globalRegistered: tools?.get ? tools.get(SEND_FILE_TOOL_NAME) !== undefined : 'inspection unavailable',
+      hasAgent: agent !== undefined,
+      agentContextToolsAvailable: agentTools !== undefined,
+      agentRegistered: agent && scopedTools?.get
+        ? scopedTools.get(SEND_FILE_TOOL_NAME, agent) !== undefined
+        : 'inspection unavailable',
+      modelToolNames: scopedTools?.schemas
+        ? scopedTools.schemas(agent).map((tool) => tool.name)
+        : 'inspection unavailable',
+    });
+  } catch (error) {
+    console.log(`[im-qqbot:debug] ${phase}: tool inspection failed`, error);
+  }
 }
 
 /** qqbot_send_file 的合法参数 */
@@ -53,9 +78,15 @@ interface SendFileArgs {
   target?: string;
 }
 
-const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
-const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
+const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
 const VOICE_EXTS = new Set(['.mp3', '.wav', '.ogg', '.aac', '.silk', '.amr']);
+
+/**
+ * 读取上限：只约束本插件把文件读进内存的大小，不代替平台的上传限制（那是 SDK 的事）。
+ * 取 QQ 平台分片上传的 100 MiB 上限；写成常量而不从 SDK 具名导入，模块加载就不会随
+ * SDK 版本或发行形态变化而失败。
+ */
+const MAX_READ_BYTES = 100 * 1024 * 1024;
 
 /** 解析显式 target（"c2c:openid" / "group:openid"），非法返回 undefined */
 function parseTarget(input: string): ReplyTarget | undefined {
@@ -98,8 +129,11 @@ export function registerSendFileTool(
   config: ImQQBotConfig,
   logger: Logger,
 ): void {
+  console.log('[im-qqbot:debug] send-file registration entered');
+  logSendFileToolState(ctx, 'before send-file registration');
   const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
   if (!tools?.register) {
+    console.log('[im-qqbot:debug] send-file registration SKIPPED: tools.register unavailable; no retry is scheduled');
     logger.warn('im-qqbot: tools 服务不可用，qqbot_send_file 工具未注册');
     return;
   }
@@ -141,6 +175,10 @@ export function registerSendFileTool(
       },
     },
     async execute(args: unknown, exec: { signal: AbortSignal; agent?: unknown }): Promise<Record<string, unknown>> {
+      console.log('[im-qqbot:debug] send-file execute entered', {
+        hasAgent: exec.agent !== undefined,
+        aborted: exec.signal.aborted,
+      });
       const { file_path, target } = args as SendFileArgs;
       if (typeof file_path !== 'string' || file_path.length === 0) {
         throw new Error('qqbot_send_file: `file_path` must be a non-empty string');
@@ -156,22 +194,30 @@ export function registerSendFileTool(
       } else if (exec.agent !== undefined) {
         replyTarget = manager.findByAgent(exec.agent as DshAgent)?.replyTarget;
       }
+      console.log('[im-qqbot:debug] send-file target resolution', {
+        explicitTarget: target !== undefined && target !== '',
+        resolved: replyTarget !== undefined,
+        scope: replyTarget?.scope,
+      });
       if (replyTarget === undefined) {
         throw new Error('qqbot_send_file: 无法确定发送目标，请显式传 target 参数');
       }
 
       // 2. 解析并校验路径：模型给的是执行世界的拼写，经 ctx.fs 解析成 target
       const fs = ctx.get('fs') as DshFsLike | undefined;
+      console.log('[im-qqbot:debug] send-file fs service', { available: fs !== undefined });
       if (fs === undefined) {
         throw new Error('qqbot_send_file: fs 服务不可用，无法解析 file_path');
       }
       const cwd = (exec.agent as DshAgent | undefined)?.session.header?.cwd
         ?? worldPath(ctx, config.cwd || process.cwd());
       const fsTarget = await fs.resolve(file_path, { cwd, signal: exec.signal });
+      console.log('[im-qqbot:debug] send-file path resolved; checking whitelist');
       if (!await isPathAllowed(fs, fsTarget, config.sendFile, cwd)) {
         throw new Error(`qqbot_send_file: file_path 不在允许的目录内: ${fsTarget.displayPath}`);
       }
       const info = await fs.stat(fsTarget, exec.signal);
+      console.log('[im-qqbot:debug] send-file stat', { exists: info !== undefined, type: info?.type, size: info?.size });
       if (info === undefined) {
         throw new Error(`qqbot_send_file: 文件不存在: ${fsTarget.displayPath}`);
       }
@@ -184,13 +230,14 @@ export function registerSendFileTool(
       const ext = fsTarget.displayPath.slice(fsTarget.displayPath.lastIndexOf('.')).toLowerCase();
       let buffer: Buffer;
       try {
-        buffer = Buffer.from(await fs.readBytes(fsTarget, exec.signal, CHUNKED_UPLOAD_MAX_SIZE));
+        buffer = Buffer.from(await fs.readBytes(fsTarget, exec.signal, MAX_READ_BYTES));
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         throw new Error(`qqbot_send_file: 读取文件失败: ${reason}`);
       }
       const fileSize = info.size ?? buffer.length;
       const source = { buffer };
+      console.log('[im-qqbot:debug] send-file bytes read; uploading', { bytes: buffer.length, ext });
 
       let result: MediaSendResult;
       if (IMAGE_EXTS.has(ext)) {
@@ -202,6 +249,10 @@ export function registerSendFileTool(
       } else {
         result = await bot.sendFile(replyTarget, source, { fileName });
       }
+      console.log('[im-qqbot:debug] send-file upload completed', {
+        hasFileUuid: Boolean(result.upload.file_uuid),
+        hasMessageId: result.message?.id !== undefined,
+      });
 
       logger.info(`im-qqbot: qqbot_send_file 发送 ${fileName} (${fileSize} bytes) → ${replyTarget.scope}:${replyTarget.targetId}`);
 
@@ -215,6 +266,14 @@ export function registerSendFileTool(
     },
   };
 
-  tools.register(definition);
+  console.log('[im-qqbot:debug] calling tools.register', { name: definition.name });
+  try {
+    const registration = tools.register(definition);
+    console.log('[im-qqbot:debug] tools.register returned', { returnType: typeof registration });
+  } catch (error) {
+    console.log('[im-qqbot:debug] tools.register FAILED', error);
+    throw error;
+  }
+  logSendFileToolState(ctx, 'after send-file registration');
   logger.info('im-qqbot: qqbot_send_file 工具已注册');
 }

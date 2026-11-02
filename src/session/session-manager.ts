@@ -21,6 +21,7 @@ import { worldPath } from '../shared/index.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
 import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
+import { logSendFileToolState } from '../media/send-file-tool.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
 import type {
@@ -346,6 +347,7 @@ export class SessionManager {
     record.agentPreset = composed.agentPreset;
     record.lastActivity = Date.now();
 
+    logSendFileToolState(this.ctx, 'session rebuilt via fork', record.agent);
     void oldHandle.dispose().catch(() => {});
     this.logger.info(`session rebuilt via fork: key=${key} preset=${composed.agentPreset ?? 'none'} sessionId=${childId}`);
   }
@@ -455,6 +457,7 @@ export class SessionManager {
 
   private async composePreset(presetId?: string): Promise<PresetComposition> {
     const presets = this.getPresetsService();
+    console.log('[im-qqbot:debug] composing preset', { presetId, presetsAvailable: presets !== undefined });
     if (!presets) return {};
 
     try {
@@ -463,7 +466,9 @@ export class SessionManager {
       return {
         agentPreset: resolvedId,
         setup: async (agentCtx: Context) => {
+          console.log('[im-qqbot:debug] mounting preset', { presetId: resolvedId });
           await presets.mount(agentCtx, resolvedId);
+          console.log('[im-qqbot:debug] preset mounted', { presetId: resolvedId });
         },
       };
     } catch (err) {
@@ -485,6 +490,7 @@ export class SessionManager {
     const existing = this.sessions.get(key);
 
     if (existing) {
+      logSendFileToolState(this.ctx, 'reusing cached QQ session', existing.agent);
       existing.replyTarget = replyTarget;
       existing.lastActivity = Date.now();
       return existing;
@@ -500,6 +506,7 @@ export class SessionManager {
 
     const live = this.agents.get(sessionId);
     if (live) {
+      console.log('[im-qqbot:debug] reusing live agent from registry');
       agent = live;
       this.logger.info(`reusing live agent: key=${key}`);
     } else {
@@ -509,6 +516,7 @@ export class SessionManager {
       const composed = await this.composePreset(presetId);
       agentPreset = composed.agentPreset;
       try {
+        console.log('[im-qqbot:debug] attempting session resume', { preset: agentPreset });
         const resumeRoute = this.modelResolver.getResumeRoute(key);
         const resumed = await this.agents.resume({
           resumeSessionId: sessionId,
@@ -518,7 +526,8 @@ export class SessionManager {
         agent = resumed.agent;
         handle = resumed;
         this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
-      } catch {
+      } catch (error) {
+        console.log('[im-qqbot:debug] session resume failed; creating session', error);
         const created = await this.agents.create({
           sessionId,
           meta: {
@@ -548,6 +557,8 @@ export class SessionManager {
     };
 
     this.sessions.set(key, record);
+    console.log('[im-qqbot:debug] QQ session ready', { scope, preset: agentPreset });
+    logSendFileToolState(this.ctx, 'QQ session ready: checking agent tool visibility', agent);
     return record;
   }
 

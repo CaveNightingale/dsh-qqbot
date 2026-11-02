@@ -23,7 +23,7 @@ import type { ChatScope, Logger } from '../types.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
-import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
+import { logSendFileToolState, registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -46,7 +46,9 @@ export async function bootstrapGateway(
   config: ImQQBotConfig,
   logger: Logger,
 ): Promise<void> {
+  logSendFileToolState(ctx, 'gateway bootstrap entered');
   const manager = new SessionManager(ctx, agents, config, logger);
+  console.log('[im-qqbot:debug] session manager initialized');
 
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
@@ -60,12 +62,14 @@ export async function bootstrapGateway(
     logger,
   } as ConstructorParameters<typeof QQBot>[0]);
   logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
+  console.log('[im-qqbot:debug] QQBot SDK initialized');
 
   // ── 中间件链 ──
   setupMiddlewares(bot, config, manager, logger);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
+    logSendFileToolState(ctx, 'QQ message received after middleware');
     const msg = mCtx.message;
     // 记录最近 msgId，供无上下文的出站发送（文件发送显式 target、主动推送等）获取被动回复目标
     cacheMsgId(mCtx.replyTarget.scope, mCtx.replyTarget.targetId, mCtx.replyTarget.msgId);
@@ -125,10 +129,12 @@ export async function bootstrapGateway(
   });
 
   bot.on('error', (err: unknown) => {
+    console.log('[im-qqbot:debug] bot error', err);
     logger.error(`bot error: ${err instanceof Error ? err.message : String(err)}`);
   });
 
   bot.on('ready', () => {
+    logSendFileToolState(ctx, 'bot ready');
     console.log(`[im-qqbot] Bot ready! appId=${config.appId}`);
   });
 
@@ -139,7 +145,9 @@ export async function bootstrapGateway(
 
   // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
   ensureVisionInputModal(config.vision, logger);
+  console.log('[im-qqbot:debug] registering vision tool before send-file tool', { enabled: config.vision.enabled });
   registerDescribeImageTool(ctx, config.vision, logger);
+  console.log('[im-qqbot:debug] vision registration returned; proceeding to send-file');
 
   // ── 附件发送工具注册（qqbot_send_file） ──
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
@@ -151,16 +159,20 @@ export async function bootstrapGateway(
     sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
   };
   registerSendFileTool(ctx, mediaSender, manager, config, logger);
+  console.log('[im-qqbot:debug] send-file registration returned; installing lifecycle');
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
     .effect(() => {
+      logSendFileToolState(ctx, 'bot lifecycle starting');
       logger.info(`Starting bot (appId=${config.appId})`);
       bot.start().catch((err: unknown) => {
+        console.log('[im-qqbot:debug] bot.start FAILED', err);
         logger.error(`Bot start failed: ${err instanceof Error ? err.message : String(err)}`);
       });
 
       return async () => {
+        console.log('[im-qqbot:debug] bot lifecycle disposing');
         logger.info('Shutting down');
         await manager.disposeAll();
         bot.stop();

@@ -21,6 +21,15 @@ export type { ImQQBotConfig } from './config.ts';
 
 // ── 插件主体 ──
 export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> {
+  console.log('[im-qqbot:debug] apply entered', {
+    pid: process.pid,
+    nodeVersion: process.version,
+    entryUrl: import.meta.url,
+    inject,
+    preset: config.preset,
+    visionEnabled: config.vision.enabled,
+    toolsModeEnv: process.env.DSH_TOOLS_MODE,
+  });
   const agents = (ctx as unknown as Record<string, unknown>).agents as DshAgentRegistry;
   const logger: Logger = ((ctx as unknown as Record<string, unknown>).logger as Logger) ?? console;
 
@@ -31,10 +40,12 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
 
   // ── 凭据缺失时唤起扫码绑定 ──
   if (!appId || !appSecret) {
+    console.log('[im-qqbot:debug] credentials incomplete; entering QR setup');
     logger.info('凭据未配置，尝试扫码绑定...');
     const credentials = await runQrSetup();
 
     if (!credentials) {
+      console.log('[im-qqbot:debug] apply stopped: QR setup did not return credentials');
       logger.error('无法获取 QQ Bot 凭据，插件未启动');
       return;
     }
@@ -48,6 +59,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
     // 持久化到 profile：成功则等待热更新重载，失败则用 env 凭据直接启动
     const persisted = persistCredentialsToProfile(credentials, getProfileDir() ?? undefined, logger);
     if (persisted) {
+      console.log('[im-qqbot:debug] apply stopped: credentials saved; waiting for hot reload');
       // 写入 cordis.patch.yml 会触发 dsh 热更新，自动重新加载本插件。
       // 直接返回，避免与热更新产生竞态。
       logger.info('配置已保存，等待热更新重新加载...');
@@ -58,5 +70,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
 
   const resolvedConfig: ImQQBotConfig = { ...config, appId, appSecret };
 
+  console.log('[im-qqbot:debug] entering bootstrapGateway');
   await bootstrapGateway(ctx, agents, resolvedConfig, logger);
+  console.log('[im-qqbot:debug] bootstrapGateway completed');
 }
